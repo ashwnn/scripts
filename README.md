@@ -1,4 +1,4 @@
-# School Scripts
+# Scripts
 
 A growing collection of bite-sized utilities for common school automation tasks, arranged as standalone scripts you can drop into any workflow.
 

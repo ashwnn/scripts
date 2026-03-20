@@ -1,14 +1,14 @@
 # Scripts
-
-A growing collection of bite-sized utilities for common school automation tasks, arranged as standalone scripts you can drop into any workflow.
+My collection of utilities for automation, and doing random shit in general idk
 
 ## Scripts
 
 - [`D2L_Downloader.user.js`](D2L_Downloader.user.js) — A browser userscript (Tampermonkey/Violentmonkey/Greasemonkey) that adds a floating "Download All Files" pill to BCIT D2L content pages so you can grab allowed documents in one click.
 - [`RBC_Transaction_Exporter.user.js`](RBC_Transaction_Exporter.user.js) — A browser userscript (Tampermonkey/Violentmonkey/Greasemonkey) that adds a floating a export all button, to export RBC Transactions into CSV instead of standard PDF
-- [`Teams_No_Idle.ps1`](Teams_No_Idle.ps1) — A PowerShell console tool for Windows that juggles the mouse or presses F15 with a lightweight TUI to keep Teams (or similar apps) from going idle.
+- [`Teams_No_Idle.ps1`](Teams_No_Idle.ps1): A PowerShell console tool for Windows that juggles the mouse or presses F15 with a lightweight TUI to keep Teams, or similar apps, from going idle.
+  > **NOTE:** This app was written using Claude Sonnet 4.6 Thinking, based off my original code.
 
-Scripts are intentionally simple, grouped by platform/stack (e.g., userscripts for browsers, PowerShell for Windows), and the repository will keep growing as new helpers emerge.
+  <details><summary>View Screenshot</summary><img alt="Screenshot of Teams_No_Idle.ps1" src="https://github.com/user-attachments/assets/3540716d-51fd-4a88-ae06-5ccb96989ae3" /></details>
 
 ## License
 

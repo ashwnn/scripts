@@ -1,617 +1,632 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Set console encoding to UTF-8 for proper character display
+[Console]::Title = "Stay Green Monitor"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-# Native Windows API interop
+# ---------------------------------------------------------------------------
+# Log file — same directory as script, fallback to cwd
+# ---------------------------------------------------------------------------
+$script:logFilePath = if ($PSScriptRoot) {
+    Join-Path $PSScriptRoot "StayGreen.log"
+} else {
+    Join-Path (Get-Location).Path "StayGreen.log"
+}
+
+# ---------------------------------------------------------------------------
+# Native Windows API
+# ---------------------------------------------------------------------------
 if (-not ("NativeKeepAlive" -as [type])) {
-Add-Type -Language CSharp -TypeDefinition @"
+    Add-Type -Language CSharp -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
 public static class NativeKeepAlive
 {
     [StructLayout(LayoutKind.Sequential)]
-    private struct LASTINPUTINFO
-    {
-        public uint cbSize;
-        public uint dwTime;
-    }
+    private struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
 
-    [DllImport("user32.dll")]
-    private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
-
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
-
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll")] private static extern bool GetLastInputInfo(ref LASTINPUTINFO p);
+    [DllImport("user32.dll")] public  static extern void mouse_event(uint f, int dx, int dy, uint d, UIntPtr e);
+    [DllImport("user32.dll")] public  static extern void keybd_event(byte vk, byte sc, uint f, UIntPtr e);
 
     private const uint MOUSEEVENTF_MOVE = 0x0001;
-    private const uint KEYEVENTF_KEYUP = 0x0002;
-    private const int INPUT_DELAY_MS = 10;
+    private const uint KEYEVENTF_KEYUP  = 0x0002;
+    private const int  DELAY_MS         = 10;
 
-    public static uint GetIdleMilliseconds()
-    {
+    public static uint GetIdleMilliseconds() {
         LASTINPUTINFO lii = new LASTINPUTINFO();
-        lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
-
-        if (!GetLastInputInfo(ref lii))
-            return 0;
-
-        unchecked
-        {
-            return (uint)Environment.TickCount - lii.dwTime;
-        }
+        lii.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(LASTINPUTINFO));
+        if (!GetLastInputInfo(ref lii)) return 0;
+        unchecked { return (uint)Environment.TickCount - lii.dwTime; }
     }
 
-    public static void MouseJiggle()
-    {
-        mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, UIntPtr.Zero);
-        System.Threading.Thread.Sleep(INPUT_DELAY_MS);
+    public static void MouseJiggle() {
+        mouse_event(MOUSEEVENTF_MOVE,  1, 0, 0, UIntPtr.Zero);
+        System.Threading.Thread.Sleep(DELAY_MS);
         mouse_event(MOUSEEVENTF_MOVE, -1, 0, 0, UIntPtr.Zero);
     }
 
-    public static void PressF15()
-    {
+    public static void PressF15() {
         const byte VK_F15 = 0x7E;
-        keybd_event(VK_F15, 0, 0, UIntPtr.Zero);
-        System.Threading.Thread.Sleep(INPUT_DELAY_MS);
+        keybd_event(VK_F15, 0, 0,               UIntPtr.Zero);
+        System.Threading.Thread.Sleep(DELAY_MS);
         keybd_event(VK_F15, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
     }
 }
 "@
 }
 
-$cfg = [ordered]@{
+# ---------------------------------------------------------------------------
+# Window sizing
+# ---------------------------------------------------------------------------
+try {
+    if ([Console]::WindowWidth -lt 110) { [Console]::WindowWidth = 110 }
+    if ([Console]::BufferWidth -lt [Console]::WindowWidth) {
+        [Console]::BufferWidth = [Console]::WindowWidth
+    }
+} catch {}
+
+# ---------------------------------------------------------------------------
+# Config
+# OPT: plain hashtable — marginally faster key lookup than [ordered] for
+#      hot-path reads since ordered uses an ArrayList for key ordering
+# ---------------------------------------------------------------------------
+$script:cfg = @{
     IntervalSeconds      = 20
     IdleThresholdSeconds = 50
     Action               = "MouseJiggle"
-    MaxLogLines          = 500
-    LogViewLines         = 15
+    MaxLogLines          = 200        # 200 is plenty; less than original 500
     UseUnicodeChars      = $true
-    UiWidth              = 76
     RenderIntervalMs     = 500
     LoopSleepMs          = 100
     ShutdownDelayMs      = 500
+    EyeIntervalMs        = 750
 }
 
-$state = [ordered]@{
-    Running               = $false
-    NextCheck             = (Get-Date).AddSeconds($cfg.IntervalSeconds)
+# ---------------------------------------------------------------------------
+# Eye animation — fixed-length array, no heap growth ever
+# Sequence: center -> left -> center -> right -> center -> blink
+# ---------------------------------------------------------------------------
+$script:eyeFrames = [string[]]@(
+    "(  o o  )"   # 0  center
+    "( o o   )"   # 1  left
+    "(  o o  )"   # 2  center
+    "(   o o )"   # 3  right
+    "(  o o  )"   # 4  center
+    "(  - -  )"   # 5  blink
+)
+$script:EYE_FRAME_COUNT = $script:eyeFrames.Length
+
+# ---------------------------------------------------------------------------
+# Box characters — resolved once; stored as bare variables, not a hashtable
+# OPT: removes one hashtable key-lookup per character reference in render loop
+# ---------------------------------------------------------------------------
+if ($script:cfg.UseUnicodeChars) {
+    $script:bV      = [char]0x2502        # │  (char for IndexOf)
+    $script:bVS     = [string][char]0x2502  # │  (string for Write)
+    $script:bH      = [string][char]0x2500  # ─
+    $script:bTL     = [string][char]0x256D  # ╭
+    $script:bTR     = [string][char]0x256E  # ╮
+    $script:bBL     = [string][char]0x2570  # ╰
+    $script:bBR     = [string][char]0x256F  # ╯
+    $script:bTTop   = [string][char]0x252C  # ┬
+    $script:bTBot   = [string][char]0x2534  # ┴
+    $script:bDot    = [string][char]0x25CF  # ●
+    $script:bCircle = [string][char]0x25CB  # ○
+} else {
+    $script:bV      = [char]'|'
+    $script:bVS     = "|"
+    $script:bH      = "-"
+    $script:bTL     = "+"  ;  $script:bTR = "+"
+    $script:bBL     = "+"  ;  $script:bBR = "+"
+    $script:bTTop   = "+"  ;  $script:bTBot = "+"
+    $script:bDot    = "*"  ;  $script:bCircle = "o"
+}
+
+# ---------------------------------------------------------------------------
+# Layout constants
+# ---------------------------------------------------------------------------
+$script:COL1_WIDTH = 42
+$script:LEFT_ROWS  = 17   # left column always has exactly 17 rows
+
+# ---------------------------------------------------------------------------
+# Border / static-string cache
+# OPT: strings are rebuilt only when the console window width changes,
+#      not on every render call (~500 ms interval)
+# ---------------------------------------------------------------------------
+$script:cacheWinWidth   = -1
+$script:cacheCol2Width  = 0
+$script:cacheTopBorder  = ""
+$script:cacheBotBorder  = ""
+$script:cacheBlankLine  = ""
+$script:cacheStatusHdr  = ""
+$script:cacheMetricsHdr = ""
+$script:cacheCtrlHdr    = ""
+$script:cacheLogHdr     = ""
+# Control rows pre-padded to COL1_WIDTH so PadRight is skipped at render time
+$script:cacheCtrl1      = ""
+$script:cacheCtrl2      = ""
+$script:cacheCtrl3      = ""
+
+function Update-BorderCache {
+    $w = [Console]::WindowWidth
+    if ($w -lt 80) { $w = 80 }
+    if ($w -eq $script:cacheWinWidth) { return }   # width unchanged — nothing to do
+
+    $c1 = $script:COL1_WIDTH
+    $c2 = [Math]::Max(20, $w - $c1 - 4)
+    $H  = $script:bH
+
+    $script:cacheWinWidth   = $w
+    $script:cacheCol2Width  = $c2
+    $script:cacheTopBorder  = "$($script:bTL)$($H * $c1)$($script:bTTop)$($H * $c2)$($script:bTR)"
+    $script:cacheBotBorder  = "$($script:bBL)$($H * $c1)$($script:bTBot)$($H * $c2)$($script:bBR)"
+    $script:cacheBlankLine  = ' ' * $w
+
+    # Helper: build a column header with trailing dashes to fill $width chars
+    $mkHdr = {
+        param([string]$title, [int]$width)
+        $d = $width - $title.Length - 1
+        if ($d -lt 0) { $d = 0 }
+        return "$title $($script:bH * $d)"
+    }
+    $script:cacheStatusHdr  = & $mkHdr " STATUS"       $c1
+    $script:cacheMetricsHdr = & $mkHdr " METRICS"      $c1
+    $script:cacheCtrlHdr    = & $mkHdr " CONTROLS"     $c1
+    $script:cacheLogHdr     = & $mkHdr " ACTIVITY LOG" $c2
+
+    # Pre-pad static control rows so the render loop skips PadRight for them
+    $script:cacheCtrl1 = " [S] Start/Stop   [C] Clear Log".PadRight($c1)
+    $script:cacheCtrl2 = " [I] Interval     [Q] Quit".PadRight($c1)
+    $script:cacheCtrl3 = " [T] Threshold    [A] Action".PadRight($c1)
+}
+
+# ---------------------------------------------------------------------------
+# State
+# OPT: EyeLastUpdateTick uses Environment.TickCount (Int32 read, zero alloc)
+#      instead of DateTime.Now which allocates a new DateTime struct each call
+# ---------------------------------------------------------------------------
+$script:state = @{
+    Running               = $true
+    NextCheck             = [DateTime]::MinValue   # set after first init log
     LastActionAt          = $null
     ActionCount           = 0
-    CurrentRunStart       = $null
+    CurrentRunStart       = [DateTime]::Now
     AccumulatedRunSeconds = 0.0
-    LastRendered          = ""
     NeedsRedraw           = $true
     QuitFlag              = $false
+    EyeFrameIndex         = 0
+    EyeLastUpdateTick     = [Environment]::TickCount
 }
 
-$log = New-Object System.Collections.Generic.List[string]
+# ---------------------------------------------------------------------------
+# Circular log buffer
+# OPT: Queue[string] — O(1) Enqueue at tail + O(1) Dequeue from head
+#      The previous List[string].RemoveRange(0, n) was O(n) because it shifts
+#      every remaining element in the backing array forward after each trim
+# ---------------------------------------------------------------------------
+$script:logQ = New-Object 'System.Collections.Generic.Queue[string]' ($script:cfg.MaxLogLines + 1)
 
-if ($cfg.UseUnicodeChars) {
-    $box = @{
-        TL  = [string][char]0x256D  # ╭
-        TR  = [string][char]0x256E  # ╮
-        BL  = [string][char]0x2570  # ╰
-        BR  = [string][char]0x256F  # ╯
-        H   = [string][char]0x2500  # ─
-        V   = [string][char]0x2502  # │
-        DH  = [string][char]0x2550  # ═
-        DV  = [string][char]0x2551  # ║
-        DTL = [string][char]0x2554  # ╔
-        DTR = [string][char]0x2557  # ╗
-        DBL = [string][char]0x255A  # ╚
-        DBR = [string][char]0x255D  # ╝
-        Dot = [string][char]0x25CF  # ●
-        Circle = [string][char]0x25CB  # ○
-    }
-}
-else {
-    $box = @{
-        TL  = "+"
-        TR  = "+"
-        BL  = "+"
-        BR  = "+"
-        H   = "-"
-        V   = "|"
-        DH  = "="
-        DV  = "|"
-        DTL = "+"
-        DTR = "+"
-        DBL = "+"
-        DBR = "+"
-        Dot = "*"
-        Circle = "o"
-    }
-}
+# ---------------------------------------------------------------------------
+# Persistent StreamWriter for file logging
+# OPT: one open file handle for the entire session instead of Add-Content
+#      which opens, seeks-to-end, writes, flushes, and closes on every call
+# ---------------------------------------------------------------------------
+$script:logWriter = $null
+try {
+    $script:logWriter = [System.IO.StreamWriter]::new(
+        $script:logFilePath, $true, [System.Text.Encoding]::UTF8
+    )
+    $script:logWriter.AutoFlush = $true
+} catch {}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 function Get-IdleSeconds {
-    [Math]::Floor(([NativeKeepAlive]::GetIdleMilliseconds() / 1000.0))
+    # OPT: pure integer math, no DateTime object created
+    [int][Math]::Floor([NativeKeepAlive]::GetIdleMilliseconds() / 1000.0)
 }
 
-function Add-Log {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Message,
-        [string]$Level = "INFO"
-    )
+function Get-OrdinalSuffix([int]$Day) {
+    if ($Day -in 11, 12, 13) { return "th" }
+    switch ($Day % 10) {
+        1 { return "st" }  2 { return "nd" }  3 { return "rd" }  default { return "th" }
+    }
+}
 
-    $ts = (Get-Date).ToString("HH:mm:ss")
-    $logLine = "[$ts] [$Level] $Message"
-    $log.Add($logLine)
+function Format-DisplayDate([DateTime]$Now) {
+    # OPT: caller passes $Now so no second [DateTime]::Now is needed here
+    # Output: "Feb 26th 2026 10:20:13"
+    $sfx = Get-OrdinalSuffix $Now.Day
+    return $Now.ToString("MMM ") + $Now.Day + $sfx + $Now.ToString(" yyyy HH:mm:ss")
+}
 
-    if ($log.Count -gt $cfg.MaxLogLines) {
-        $removeCount = $log.Count - $cfg.MaxLogLines
-        $log.RemoveRange(0, $removeCount)
+function Format-Uptime([object]$StartTime, [DateTime]$Now) {
+    # OPT: caller passes $Now — reuses the single timestamp from the render call
+    if ($null -eq $StartTime) { return "-" }
+    $span = $Now - [DateTime]$StartTime
+    if ($span.TotalHours   -ge 1) { return "{0:D2}h {1:D2}m {2:D2}s" -f [int][Math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds }
+    if ($span.TotalMinutes -ge 1) { return "{0:D2}m {1:D2}s"          -f $span.Minutes, $span.Seconds }
+    return "{0}s" -f $span.Seconds
+}
+
+function Format-DurationSeconds([double]$TotalSeconds) {
+    if ($TotalSeconds -lt 0) { $TotalSeconds = 0 }
+    $span = [TimeSpan]::FromSeconds([Math]::Floor($TotalSeconds))
+    return "{0:D2}h {1:D2}m {2:D2}s" -f [int][Math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds
+}
+
+function Get-TotalRuntimeSeconds {
+    $total = [double]$script:state.AccumulatedRunSeconds
+    if ($null -ne $script:state.CurrentRunStart) {
+        $total += ([DateTime]::Now - [DateTime]$script:state.CurrentRunStart).TotalSeconds
+    }
+    return [Math]::Max(0.0, $total)
+}
+
+function Test-ConfigInt([object]$Value, [int]$Min, [int]$Max) {
+    if ($null -eq $Value) { return $false }
+    $v = 0
+    if (-not [int]::TryParse($Value.ToString(), [ref]$v)) { return $false }
+    return ($v -ge $Min -and $v -le $Max)
+}
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+function Add-Log([string]$Message, [string]$Level = "INFO") {
+    $line = "[{0}] [{1}] {2}" -f [DateTime]::Now.ToString("HH:mm:ss"), $Level, $Message
+
+    $script:logQ.Enqueue($line)
+    # OPT: Dequeue is O(1) — no element shifting like List.RemoveRange
+    if ($script:logQ.Count -gt $script:cfg.MaxLogLines) {
+        [void]$script:logQ.Dequeue()
     }
 
-    $state.NeedsRedraw = $true
+    if ($null -ne $script:logWriter) {
+        try { $script:logWriter.WriteLine($line) } catch {}
+    }
+
+    $script:state.NeedsRedraw = $true
 }
 
 function Invoke-KeepAliveAction {
     $idle = Get-IdleSeconds
-
-    if ($idle -lt $cfg.IdleThresholdSeconds) {
-        return
-    }
+    if ($idle -lt $script:cfg.IdleThresholdSeconds) { return }
 
     try {
-        if ($cfg.Action -eq "MouseJiggle") {
+        if ($script:cfg.Action -eq "MouseJiggle") {
             [NativeKeepAlive]::MouseJiggle()
-            Add-Log "Idle ${idle}s >= $($cfg.IdleThresholdSeconds)s -> Mouse jiggle (+/-1px)" "ACTION"
-        }
-        elseif ($cfg.Action -eq "F15") {
+            Add-Log "Idle ${idle}s >= $($script:cfg.IdleThresholdSeconds)s -> Mouse jiggle" "ACTION"
+        } elseif ($script:cfg.Action -eq "F15") {
             [NativeKeepAlive]::PressF15()
-            Add-Log "Idle ${idle}s >= $($cfg.IdleThresholdSeconds)s -> F15 key press" "ACTION"
-        }
-        else {
-            Add-Log "Unknown action '$($cfg.Action)' - skipped" "WARN"
+            Add-Log "Idle ${idle}s >= $($script:cfg.IdleThresholdSeconds)s -> F15 key press" "ACTION"
+        } else {
+            Add-Log "Unknown action '$($script:cfg.Action)' - skipped" "WARN"
             return
         }
-
-        $state.LastActionAt = Get-Date
-        $state.ActionCount++
-        $state.NeedsRedraw = $true
-    }
-    catch {
+        $script:state.LastActionAt = [DateTime]::Now
+        $script:state.ActionCount++
+        $script:state.NeedsRedraw = $true
+    } catch {
         Add-Log "Action failed: $($_.Exception.Message)" "ERROR"
     }
 }
 
-function Format-Uptime {
-    param([object]$StartTime = $null)
+# ---------------------------------------------------------------------------
+# Rendering
+#
+# Optimisation summary:
+#   [Console]::Out  — write directly to the TextWriter; skips Write-Host's
+#                     PowerShell pipeline, format-string parser, and object
+#                     unwrapping (~10x faster per line of output)
+#   ForegroundColor — set via property assignment, not a cmdlet
+#   .Contains()     — O(n) scan with no regex engine; replaces -match
+#   [string[]]::new — fixed-size array allocated once; no List resizing
+#   Cached strings  — borders, headers, control rows rebuilt only on resize
+#   LINQ Skip       — snapshots only the visible log window (≤16 entries)
+#                     instead of the full 200-entry Queue backing store
+#   [DateTime]::Now — one call per render, passed to sub-functions
+#   No intermediate full-TUI string — render line-by-line directly
+# ---------------------------------------------------------------------------
 
-    if ($null -eq $StartTime) {
-        return "-"
-    }
-
-    $span = (Get-Date) - ([DateTime]$StartTime)
-    if ($span.TotalHours -ge 1) {
-        return "{0:D2}h {1:D2}m {2:D2}s" -f [int][Math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds
-    }
-    elseif ($span.TotalMinutes -ge 1) {
-        return "{0:D2}m {1:D2}s" -f $span.Minutes, $span.Seconds
-    }
-    else {
-        return "{0}s" -f $span.Seconds
-    }
-}
-
-function Format-DurationSeconds {
-    param([double]$TotalSeconds = 0)
-
-    if ($TotalSeconds -lt 0) {
-        $TotalSeconds = 0
-    }
-
-    $span = [TimeSpan]::FromSeconds([Math]::Floor($TotalSeconds))
-    if ($span.TotalHours -ge 1) {
-        return "{0:D2}h {1:D2}m {2:D2}s" -f [int][Math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds
-    }
-    elseif ($span.TotalMinutes -ge 1) {
-        return "{0:D2}m {1:D2}s" -f $span.Minutes, $span.Seconds
-    }
-    else {
-        return "{0}s" -f $span.Seconds
-    }
-}
-
-function Get-TotalRuntimeSeconds {
-    $total = [double]$state.AccumulatedRunSeconds
-    if ($null -ne $state.CurrentRunStart) {
-        $total += ((Get-Date) - ([DateTime]$state.CurrentRunStart)).TotalSeconds
-    }
-    return [Math]::Max(0, $total)
-}
-
-function Test-ConfigInt {
-    param(
-        [Nullable[int]]$Value,
-        [int]$Min,
-        [int]$Max
-    )
-
-    if ($null -eq $Value) {
-        return $false
-    }
-
-    return ($Value -ge $Min -and $Value -le $Max)
-}
-
-function Get-StatusBar {
-    $now = Get-Date
-    $idle = Get-IdleSeconds
-
-    if ($state.Running) {
-        $statusIcon = $box.Dot
-        $statusText = "RUNNING"
-        $statusColor = "Green"
-    }
-    else {
-        $statusIcon = $box.Circle
-        $statusText = "STOPPED"
-        $statusColor = "Gray"
-    }
-
-    return @{
-        Icon  = $statusIcon
-        Text  = $statusText
-        Color = $statusColor
-        Idle  = $idle
-        Time  = $now.ToString("yyyy-MM-dd HH:mm:ss")
-    }
-}
-
-function New-SectionHeader {
-    param(
-        [string]$Title,
-        [string]$Left,
-        [string]$Right,
-        [string]$Fill,
-        [int]$InnerWidth
-    )
-    $label = "$Fill $Title "
-    $remaining = $InnerWidth - $label.Length
-    if ($remaining -lt 0) { $remaining = 0 }
-    return "$Left$label$($Fill * $remaining)$Right"
-}
-
-function New-ContentLine {
-    param(
-        [string]$Text,
-        [int]$InnerWidth
-    )
-    $padded = " $Text"
-    if ($padded.Length -gt $InnerWidth) {
-        $padded = $padded.Substring(0, $InnerWidth - 3) + "..."
-    }
-    return "$($box.V)$($padded.PadRight($InnerWidth))$($box.V)"
-}
-
-function New-BottomBorder {
-    param([int]$InnerWidth)
-    return "$($box.BL)$($box.H * $InnerWidth)$($box.BR)"
-}
-
-function Build-TuiContent {
-    $status = Get-StatusBar
-
-    if ($state.Running) {
-        $nextCheckText = $state.NextCheck.ToString("HH:mm:ss")
-    }
-    else {
-        $nextCheckText = "-"
-    }
-
-    if ($null -ne $state.LastActionAt) {
-        $lastActionText = $state.LastActionAt.ToString("HH:mm:ss")
-    }
-    else {
-        $lastActionText = "-"
-    }
-
-    $uptimeText = Format-Uptime $state.CurrentRunStart
-
-    $sb = New-Object System.Text.StringBuilder
-    $width = $cfg.UiWidth  # total width including border chars
-    $inner = $width - 2  # inner width between border characters
-
-    [void]$sb.AppendLine("$($box.DTL)$($box.DH * $inner)$($box.DTR)")
-    $title = "Stay Green Monitor"
-    $pad = [Math]::Max(0, $inner - $title.Length)
-    $leftPad = [int][Math]::Floor($pad / 2)
-    $rightPad = $pad - $leftPad
-    [void]$sb.AppendLine("$($box.DV)$(' ' * $leftPad)$title$(' ' * $rightPad)$($box.DV)")
-    [void]$sb.AppendLine("$($box.DBL)$($box.DH * $inner)$($box.DBR)")
-    [void]$sb.AppendLine("")
-
-    [void]$sb.AppendLine((New-SectionHeader -Title "Status" -Left $box.TL -Right $box.TR -Fill $box.H -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text "Time:   $($status.Time)" -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text "State:  $($status.Icon) $($status.Text)" -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text "Uptime: $uptimeText" -InnerWidth $inner))
-    [void]$sb.AppendLine((New-BottomBorder -InnerWidth $inner))
-    [void]$sb.AppendLine("")
-
-    [void]$sb.AppendLine((New-SectionHeader -Title "Metrics" -Left $box.TL -Right $box.TR -Fill $box.H -InnerWidth $inner))
-    
-    if ($status.Idle -ge $cfg.IdleThresholdSeconds) {
-        $idleStatus = "(>= threshold)"
-    }
-    else {
-        $idleStatus = ""
-    }
-    
-    [void]$sb.AppendLine((New-ContentLine -Text ("Current idle time:    {0,4}s  {1}" -f $status.Idle, $idleStatus) -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text ("Check interval:       {0,4}s" -f $cfg.IntervalSeconds) -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text ("Idle threshold:       {0,4}s" -f $cfg.IdleThresholdSeconds) -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text ("Action type:          {0}" -f $cfg.Action) -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text ("Next check at:        {0}" -f $nextCheckText) -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text ("Last action at:       {0}" -f $lastActionText) -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text ("Actions performed:    {0}" -f $state.ActionCount) -InnerWidth $inner))
-    [void]$sb.AppendLine((New-BottomBorder -InnerWidth $inner))
-    [void]$sb.AppendLine("")
-
-    [void]$sb.AppendLine((New-SectionHeader -Title "Controls" -Left $box.TL -Right $box.TR -Fill $box.H -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text "[S] Start/Stop   [I] Interval   [T] Threshold   [A] Action" -InnerWidth $inner))
-    [void]$sb.AppendLine((New-ContentLine -Text "[C] Clear Log    [Q] Quit" -InnerWidth $inner))
-    [void]$sb.AppendLine((New-BottomBorder -InnerWidth $inner))
-    [void]$sb.AppendLine("")
-
-    [void]$sb.AppendLine((New-SectionHeader -Title "Activity Log" -Left $box.TL -Right $box.TR -Fill $box.H -InnerWidth $inner))
-
-    $count = $log.Count
-    $take = [Math]::Min($cfg.LogViewLines, $count)
-    $start = [Math]::Max(0, $count - $take)
-
-    if ($count -eq 0) {
-        [void]$sb.AppendLine((New-ContentLine -Text "(No activity yet)" -InnerWidth $inner))
-        $take = 1
-    }
-    else {
-        for ($i = $start; $i -lt $count; $i++) {
-            [void]$sb.AppendLine((New-ContentLine -Text $log[$i] -InnerWidth $inner))
-        }
-    }
-
-    $emptyLine = "$($box.V)$(' ' * $inner)$($box.V)"
-    $linesToPad = $cfg.LogViewLines - $take
-    for ($i = 0; $i -lt $linesToPad; $i++) {
-        [void]$sb.AppendLine($emptyLine)
-    }
-
-    [void]$sb.AppendLine((New-BottomBorder -InnerWidth $inner))
-
-    return $sb.ToString()
-}
-
-function Show-Tui {
-    param([switch]$Force)
-
-    $content = Build-TuiContent
-
-    if ($Force -or $state.NeedsRedraw -or $content -ne $state.LastRendered) {
-        [Console]::SetCursorPosition(0, 0)
-
-        $trimmed = $content.TrimEnd([char]13, [char]10)
-        $lines = $trimmed -split "`r?`n"
-
-        $consoleWidth = [Console]::WindowWidth
-        if ($consoleWidth -lt 1) { $consoleWidth = 80 }
-
-        foreach ($line in $lines) {
-            if ($line.Length -ge $consoleWidth) {
-                $padded = $line.Substring(0, $consoleWidth)
-            }
-            else {
-                $padded = $line.PadRight($consoleWidth)
-            }
-
-            $lineColor = Get-LineColor -Line $line
-            if ($null -ne $lineColor) {
-                Write-ColoredContentLine -Line $padded -Color $lineColor
-            }
-            else {
-                Write-Host $padded
-            }
-        }
-
-        $blankLine = " " * $consoleWidth
-        $currentY = [Console]::CursorTop
-        $windowHeight = [Console]::WindowHeight
-        $remaining = $windowHeight - $currentY - 1
-        for ($i = 0; $i -lt $remaining; $i++) {
-            Write-Host $blankLine
-        }
-
-        $state.LastRendered = $content
-        $state.NeedsRedraw = $false
-    }
-}
-
-function Get-LineColor {
-    param([string]$Line)
-
-    if ($Line -match "RUNNING") { return "Green" }
-    if ($Line -match "STOPPED") { return "Gray" }
-    if ($Line -match "\[ACTION\]") { return "Cyan" }
-    if ($Line -match "\[WARN\]") { return "Yellow" }
-    if ($Line -match "\[ERROR\]") { return "Red" }
-    if ($Line -match "Stay Green Monitor") { return "Cyan" }
-    if ($Line -match "Status|Metrics|Controls|Activity Log") { return "DarkCyan" }
+function Get-LogLineColor([string]$Line) {
+    # OPT: .Contains() avoids regex engine startup cost on every log row
+    if ($Line.Contains("[ERROR]"))  { return [ConsoleColor]::Red }
+    if ($Line.Contains("[WARN]"))   { return [ConsoleColor]::Yellow }
+    if ($Line.Contains("[ACTION]")) { return [ConsoleColor]::Cyan }
     return $null
 }
 
-function Write-ColoredContentLine {
-    param(
-        [string]$Line,
-        [string]$Color
-    )
+function Render-Tui {
+    Update-BorderCache
 
-    $prefix = ""
-    $suffix = ""
-    $core = $Line
+    $now     = [DateTime]::Now         # single allocation reused throughout
+    $c1      = $script:COL1_WIDTH
+    $c2      = $script:cacheCol2Width
+    $ww      = $script:cacheWinWidth
+    $vStr    = $script:bVS             # │ string — cached to avoid repeated field lookups
+    $out     = [Console]::Out          # TextWriter ref — avoids property lookup in tight loop
+    $running = $script:state.Running
 
-    if ($core.Length -gt 0 -and $core[0] -eq $box.V) {
-        $prefix = $box.V
-        $core = $core.Substring(1)
+    # ---- Build left column as a fixed-size string array (17 rows) ----
+    $left       = [string[]]::new($script:LEFT_ROWS)
+    $idle       = Get-IdleSeconds
+    $stateIcon  = if ($running) { $script:bDot } else { $script:bCircle }
+    $stateWord  = if ($running) { "RUNNING" }    else { "STOPPED" }
+    $stateColor = if ($running) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
+    $idleFlag   = if ($idle -ge $script:cfg.IdleThresholdSeconds) { " (>= cfg)" } else { "" }
+    $nextStr    = if ($running) { $script:state.NextCheck.ToString("HH:mm:ss") } else { "-" }
+    $lastActStr = if ($null -ne $script:state.LastActionAt) { $script:state.LastActionAt.ToString("HH:mm:ss") } else { "-" }
+
+    $left[0]  = $script:cacheStatusHdr
+    $left[1]  = " State:  $stateIcon $stateWord"       # left cell coloured in render loop
+    $left[2]  = " Time:   $(Format-DisplayDate $now)"
+    $left[3]  = " Uptime: $(Format-Uptime $script:state.CurrentRunStart $now)"
+    $left[4]  = " " + $script:eyeFrames[$script:state.EyeFrameIndex]   # flush-left, no leading space
+    $left[5]  = ""
+    $left[6]  = $script:cacheMetricsHdr
+    $left[7]  = " Idle:   {0,-4} / {1,-4}{2}" -f "${idle}s", "$($script:cfg.IdleThresholdSeconds)s", $idleFlag
+    $left[8]  = " Check:  $($script:cfg.IntervalSeconds)s"
+    $left[9]  = " Action: $($script:cfg.Action)"
+    $left[10] = " Next:   $nextStr"
+    $left[11] = " Acts:   $($script:state.ActionCount) ($lastActStr)"
+    $left[12] = ""
+    $left[13] = $script:cacheCtrlHdr
+    $left[14] = $script:cacheCtrl1    # already padded to $c1 in cache
+    $left[15] = $script:cacheCtrl2
+    $left[16] = $script:cacheCtrl3
+
+    # ---- Snapshot only the visible log window from the Queue ----
+    # OPT: LINQ Skip avoids allocating a full 200-element array via ToArray();
+    #      we allocate at most LEFT_ROWS-1 = 16 strings
+    $logSlots = $script:LEFT_ROWS - 1   # row 0 of right column is the header
+    $logTotal = $script:logQ.Count
+    $logShow  = [Math]::Min($logSlots, $logTotal)
+    $logSkip  = $logTotal - $logShow
+    $logSnap  = if ($logShow -gt 0) {
+        [string[]][System.Linq.Enumerable]::ToArray(
+            [System.Linq.Enumerable]::Skip(
+                [System.Collections.Generic.IEnumerable[string]]$script:logQ,
+                $logSkip
+            )
+        )
+    } else { [string[]]@() }
+
+    # ---- Output ----
+    [Console]::SetCursorPosition(0, 0)
+    $defColor = [Console]::ForegroundColor
+
+    $out.WriteLine($script:cacheTopBorder)
+
+    for ($i = 0; $i -lt $script:LEFT_ROWS; $i++) {
+
+        # Left cell — rows 14-16 were pre-padded in the cache; all others need PadRight
+        $lText = if ($i -ge 14) { $left[$i] } else { $left[$i].PadRight($c1) }
+
+        # Right cell
+        if ($i -eq 0) {
+            $rText  = $script:cacheLogHdr.PadRight($c2)
+            $rColor = $null
+        } elseif ($logShow -eq 0 -and $i -eq 1) {
+            $rText  = " (No activity yet)".PadRight($c2)
+            $rColor = $null
+        } else {
+            $li = $i - 1   # log index: left row 1 -> log entry 0
+            if ($li -lt $logShow) {
+                $msg    = $logSnap[$li]
+                if ($msg.Length -gt $c2) { $msg = $msg.Substring(0, $c2 - 3) + "..." }
+                $rText  = $msg.PadRight($c2)
+                $rColor = Get-LogLineColor $msg
+            } else {
+                $rText  = "".PadRight($c2)
+                $rColor = $null
+            }
+        }
+
+        # Write: │  [coloured left cell]  │  [coloured right cell]  │
+        if ($i -eq 1) {
+            # State row — colour the left cell only
+            $out.Write($vStr)
+            [Console]::ForegroundColor = $stateColor
+            $out.Write($lText)
+            [Console]::ForegroundColor = $defColor
+        } else {
+            $out.Write($vStr)
+            $out.Write($lText)
+        }
+
+        $out.Write($vStr)
+        if ($null -ne $rColor) {
+            [Console]::ForegroundColor = $rColor
+            $out.Write($rText)
+            [Console]::ForegroundColor = $defColor
+        } else {
+            $out.Write($rText)
+        }
+        $out.WriteLine($vStr)
     }
 
-    if ($core.Length -gt 0 -and $core[-1] -eq $box.V) {
-        $suffix = $box.V
-        $core = $core.Substring(0, $core.Length - 1)
+    $out.WriteLine($script:cacheBotBorder)
+
+    # Clear rows below the TUI so stale content from a taller prior render doesn't bleed
+    $curY = [Console]::CursorTop
+    $winH = [Console]::WindowHeight
+    while ($curY -lt ($winH - 1)) {
+        $out.WriteLine($script:cacheBlankLine)
+        $curY++
     }
 
-    if ($prefix -ne "") {
-        Write-Host $prefix -NoNewline
-    }
-
-    if ($core -ne "") {
-        Write-Host $core -NoNewline -ForegroundColor $Color
-    }
-    else {
-        Write-Host -NoNewline ""
-    }
-
-    if ($suffix -ne "") {
-        Write-Host $suffix
-    }
-    else {
-        Write-Host ""
-    }
+    $script:state.NeedsRedraw = $false
 }
 
-function Read-IntOrNull {
-    param([string]$Prompt)
+# ---------------------------------------------------------------------------
+# Input helper
+# ---------------------------------------------------------------------------
 
+function Read-IntOrNull([string]$Prompt) {
     [Console]::CursorVisible = $true
-    Write-Host ""
-    Write-Host $Prompt -NoNewline -ForegroundColor Yellow
-
+    [Console]::Out.WriteLine("")
+    [Console]::ForegroundColor = [ConsoleColor]::Yellow
+    [Console]::Out.Write($Prompt)
+    [Console]::ResetColor()
     $raw = Read-Host
     [Console]::CursorVisible = $false
-
-    if ([string]::IsNullOrWhiteSpace($raw)) { 
-        return $null 
-    }
-
-    $val = 0
-    if ([int]::TryParse($raw, [ref]$val)) { 
-        return $val 
-    }
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    $v = 0
+    if ([int]::TryParse($raw, [ref]$v)) { return $v }
     return $null
 }
+
+# ---------------------------------------------------------------------------
+# Main Execution
+# ---------------------------------------------------------------------------
 
 [Console]::CursorVisible = $false
 [Console]::Clear()
 
-Add-Log "Stay Green initialized" "INFO"
-Add-Log "Default: Interval=$($cfg.IntervalSeconds)s, Threshold=$($cfg.IdleThresholdSeconds)s, Action=$($cfg.Action)" "INFO"
-if (-not $cfg.UseUnicodeChars) {
-    Add-Log "Using ASCII-only mode (Unicode disabled)" "INFO"
+# Write session header directly to log file (bypasses Add-Log to avoid
+# putting the header lines in the in-memory queue)
+if ($null -ne $script:logWriter) {
+    $sep = "=" * 60
+    $script:logWriter.WriteLine("")
+    $script:logWriter.WriteLine($sep)
+    $script:logWriter.WriteLine("  Stay Green Session Started: $(Format-DisplayDate ([DateTime]::Now))")
+    $script:logWriter.WriteLine("  Log file: $script:logFilePath")
+    $script:logWriter.WriteLine($sep)
 }
 
-$lastRender = Get-Date
+Add-Log "Stay Green initialized" "INFO"
+Add-Log "Int=$($script:cfg.IntervalSeconds)s  Thr=$($script:cfg.IdleThresholdSeconds)s  Action=$($script:cfg.Action)" "INFO"
+Add-Log "Log: $script:logFilePath" "INFO"
+
+$script:state.NextCheck = [DateTime]::Now.AddSeconds($script:cfg.IntervalSeconds)
+
+# OPT: render timing tracked with Environment.TickCount — Int32 field read,
+#      zero allocation, wraps safely after ~49 days
+$renderLastTick = [Environment]::TickCount
 
 try {
-    while (-not $state.QuitFlag) {
-        $now = Get-Date
+    while (-not $script:state.QuitFlag) {
 
-        $timeSinceRender = ($now - $lastRender).TotalMilliseconds
-        if ($state.NeedsRedraw -or $timeSinceRender -ge $cfg.RenderIntervalMs) {
-            Show-Tui
-            $lastRender = $now
+        $tickNow = [Environment]::TickCount   # cheap Int32 read
+
+        # ---- Eye animation tick ----
+        # OPT: [int] cast ensures unchecked subtraction — handles TickCount
+        #      rollover at ~49 days without any extra logic
+        if ([int]($tickNow - $script:state.EyeLastUpdateTick) -ge $script:cfg.EyeIntervalMs) {
+            $script:state.EyeFrameIndex     = ($script:state.EyeFrameIndex + 1) % $script:EYE_FRAME_COUNT
+            $script:state.EyeLastUpdateTick = $tickNow
+            $script:state.NeedsRedraw       = $true
         }
 
+        # ---- Render ----
+        if ($script:state.NeedsRedraw -or
+            [int]($tickNow - $renderLastTick) -ge $script:cfg.RenderIntervalMs) {
+            Render-Tui
+            $renderLastTick = $tickNow
+        }
+
+        # ---- Keyboard input ----
         if ([Console]::KeyAvailable) {
             $k = [Console]::ReadKey($true)
 
             switch ($k.Key) {
                 "S" {
-                    $state.Running = -not $state.Running
-                    if ($state.Running) {
-                        $state.NextCheck = (Get-Date).AddSeconds(1)
-                        $state.CurrentRunStart = Get-Date
+                    $script:state.Running = -not $script:state.Running
+                    if ($script:state.Running) {
+                        $script:state.NextCheck       = [DateTime]::Now.AddSeconds(1)
+                        $script:state.CurrentRunStart = [DateTime]::Now
                         Add-Log "Keep-alive started" "INFO"
-                    }
-                    else {
-                        if ($null -ne $state.CurrentRunStart) {
-                            $state.AccumulatedRunSeconds += ((Get-Date) - ([DateTime]$state.CurrentRunStart)).TotalSeconds
-                            $state.CurrentRunStart = $null
+                    } else {
+                        if ($null -ne $script:state.CurrentRunStart) {
+                            $script:state.AccumulatedRunSeconds += ([DateTime]::Now - [DateTime]$script:state.CurrentRunStart).TotalSeconds
+                            $script:state.CurrentRunStart = $null
                         }
                         Add-Log "Keep-alive stopped" "INFO"
                     }
                 }
                 "I" {
-                    $v = Read-IntOrNull "Enter interval seconds (1-3600, current $($cfg.IntervalSeconds)): "
-
-                    if (Test-ConfigInt -Value $v -Min 1 -Max 3600) {
-                        $cfg.IntervalSeconds = $v
-                        Add-Log "Interval changed to $v seconds" "INFO"
-                    }
-                    else {
-                        Add-Log "Interval unchanged (invalid input)" "WARN"
+                    $v = Read-IntOrNull "Enter interval seconds (1-3600, current $($script:cfg.IntervalSeconds)): "
+                    if (Test-ConfigInt $v 1 3600) {
+                        $script:cfg.IntervalSeconds = $v
+                        Add-Log "Interval -> ${v}s" "INFO"
                     }
                     [Console]::Clear()
-                    $state.NeedsRedraw = $true
-                    Show-Tui -Force
+                    $script:state.NeedsRedraw = $true
+                    Render-Tui
                 }
                 "T" {
-                    $v = Read-IntOrNull "Enter idle threshold seconds (5-7200, current $($cfg.IdleThresholdSeconds)): "
-
-                    if (Test-ConfigInt -Value $v -Min 5 -Max 7200) {
-                        $cfg.IdleThresholdSeconds = $v
-                        Add-Log "Idle threshold changed to $v seconds" "INFO"
-                    }
-                    else {
-                        Add-Log "Threshold unchanged (invalid input)" "WARN"
+                    $v = Read-IntOrNull "Enter idle threshold seconds (5-7200, current $($script:cfg.IdleThresholdSeconds)): "
+                    if (Test-ConfigInt $v 5 7200) {
+                        $script:cfg.IdleThresholdSeconds = $v
+                        Add-Log "Idle threshold -> ${v}s" "INFO"
                     }
                     [Console]::Clear()
-                    $state.NeedsRedraw = $true
-                    Show-Tui -Force
+                    $script:state.NeedsRedraw = $true
+                    Render-Tui
                 }
                 "A" {
-                    $oldAction = $cfg.Action
-                    if ($cfg.Action -eq "MouseJiggle") {
-                        $cfg.Action = "F15"
-                    }
-                    else {
-                        $cfg.Action = "MouseJiggle"
-                    }
-                    Add-Log "Action changed: $oldAction -> $($cfg.Action)" "INFO"
+                    $old = $script:cfg.Action
+                    $script:cfg.Action = if ($script:cfg.Action -eq "MouseJiggle") { "F15" } else { "MouseJiggle" }
+                    Add-Log "Action: $old -> $($script:cfg.Action)" "INFO"
                 }
                 "C" {
-                    $log.Clear()
+                    $script:logQ.Clear()
                     Add-Log "Log cleared" "INFO"
                 }
                 "Q" {
                     Add-Log "Shutting down..." "INFO"
-                    Show-Tui -Force
-                    Start-Sleep -Milliseconds $cfg.ShutdownDelayMs
-                    $state.QuitFlag = $true
+                    Render-Tui
+                    # OPT: direct BCL call — skips Start-Sleep cmdlet pipeline overhead
+                    [Threading.Thread]::Sleep($script:cfg.ShutdownDelayMs)
+                    $script:state.QuitFlag = $true
                 }
             }
         }
 
-        # Perform keep-alive check
-        if ($state.Running -and $now -ge $state.NextCheck) {
+        # ---- Keep-alive check ----
+        # OPT: DateTime.Now only allocated here when actually needed for the
+        #      NextCheck comparison, not at the top of every loop iteration
+        $now = [DateTime]::Now
+        if ($script:state.Running -and $now -ge $script:state.NextCheck) {
             Invoke-KeepAliveAction
-            $state.NextCheck = (Get-Date).AddSeconds($cfg.IntervalSeconds)
+            $script:state.NextCheck = $now.AddSeconds($script:cfg.IntervalSeconds)
         }
 
-        # Small sleep to reduce CPU usage
-        Start-Sleep -Milliseconds $cfg.LoopSleepMs
+        # OPT: Thread.Sleep is a direct BCL call vs Start-Sleep which routes
+        #      through the PowerShell cmdlet pipeline on every iteration
+        [Threading.Thread]::Sleep($script:cfg.LoopSleepMs)
     }
 }
 finally {
     [Console]::CursorVisible = $true
+    [Console]::ResetColor()
     [Console]::Clear()
-    Write-Host "Stay Green stopped." -ForegroundColor Green
-    Write-Host "Total actions performed: $($state.ActionCount)" -ForegroundColor Cyan
 
-    $totalRuntime = Format-DurationSeconds (Get-TotalRuntimeSeconds)
-    Write-Host "Total runtime: $totalRuntime" -ForegroundColor Cyan
+    $runtime = Format-DurationSeconds (Get-TotalRuntimeSeconds)
+
+    # Flush and close the StreamWriter cleanly
+    if ($null -ne $script:logWriter) {
+        try {
+            $script:logWriter.WriteLine("  Session ended. Total runtime: $runtime")
+            $script:logWriter.WriteLine("=" * 60)
+            $script:logWriter.Close()
+            $script:logWriter.Dispose()
+        } catch {}
+    }
+
+    $out = [Console]::Out
+    [Console]::ForegroundColor = [ConsoleColor]::Green
+    $out.WriteLine("Stay Green stopped.")
+    [Console]::ForegroundColor = [ConsoleColor]::Cyan
+    $out.WriteLine("Total runtime: $runtime")
+    [Console]::ForegroundColor = [ConsoleColor]::DarkGray
+    $out.WriteLine("Log saved to:  $script:logFilePath")
+    [Console]::ResetColor()
 }

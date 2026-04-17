@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         ScreenConnect Helper
 // @namespace    local
-// @version      1.3.2
+// @version      1.4.1
 // @icon         https://www.screenconnect.com/siteassets/media/logos/screenconnect-icon-48x48.png
 // @author       Ashwin C.
-// @description  Automatically prunes old command history in ScreenConnect, keeping only the most recent N groups, and adds a toggleable PowerShell mode to the command entry panel.
-// @match        *://<your_domain>.com/*
+// @description  Automatically prunes old command history in ScreenConnect, keeping only the most recent N groups, adds a toggleable PowerShell mode to the command entry panel, and adds a full-width organization search bar below the MasterPanel Build button.
+// @match        *://<your-domain>.ca/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -21,14 +21,18 @@
     Number(localStorage.getItem('scKeepLastCommandsLimit')) || 5
   );
 
-  const LIST_SELECTOR   = '.Commands .ListPanel';
-  const GROUP_START_SEL = '.Host.QueuedCommand';
-  const ENTRY_SELECTOR  = ':scope > div';
-  const ENTRY_PANEL_SEL = '.Commands .EntryPanel';
-  const OBSERVER_KEY    = 'scKeepLastCommandsObserverAttached';
-  const ENTRY_PANEL_KEY = 'scPsToggleAttached';
-  const TOAST_ID        = 'sc-helper-toast';
-  const PS_PREFIX       = '#!ps\n';
+  const LIST_SELECTOR      = '.Commands .ListPanel';
+  const GROUP_START_SEL    = '.Host.QueuedCommand';
+  const ENTRY_SELECTOR     = ':scope > div';
+  const ENTRY_PANEL_SEL    = '.Commands .EntryPanel';
+  const OBSERVER_KEY       = 'scKeepLastCommandsObserverAttached';
+  const ENTRY_PANEL_KEY    = 'scPsToggleAttached';
+  const TOAST_ID           = 'sc-helper-toast';
+  const PS_PREFIX          = '#!ps\n';
+
+  const MASTER_PANEL_SEL   = '.MasterPanel';
+  const MASTER_PANEL_KEY   = 'scMasterToolbarAttached';
+  const MASTER_LIST_SEL    = '.MasterListContainer';
 
   let pruneQueued  = false;
   let toastTimeout = null;
@@ -134,6 +138,121 @@
       .sc-ps-active-textarea {
         background: rgb(255, 245, 245) !important;
       }
+
+      /* -----------------------------------------------------------------------
+         MasterPanel - compact Build button + inline search bar
+         ----------------------------------------------------------------------- */
+
+      /* Make p.Create a flex row with vertical padding to preserve spacing */
+      .sc-create-enhanced {
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+        padding: 6px 8px !important;
+        box-sizing: border-box !important;
+      }
+
+      /* Override SC's full-width red block button with a compact inline version */
+      .sc-create-enhanced a {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        flex-shrink: 0 !important;
+        width: auto !important;
+        height: 26px !important;
+        padding: 0 10px !important;
+        background: rgb(204, 50, 50) !important;
+        color: rgb(255, 255, 255) !important;
+        font-size: 12px !important;
+        font-family: "Roboto", "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        font-weight: 600 !important;
+        text-decoration: none !important;
+        border-radius: 2px !important;
+        white-space: nowrap !important;
+        letter-spacing: 0.02em !important;
+        box-sizing: border-box !important;
+        transition: background 0.12s ease-in-out !important;
+      }
+      .sc-create-enhanced a:hover {
+        background: rgb(185, 35, 35) !important;
+        text-decoration: none !important;
+      }
+      .sc-create-enhanced a:active {
+        background: rgb(165, 25, 25) !important;
+      }
+
+      /* Wrapper holds input + clear button, fills remaining width */
+      .sc-master-search-wrap {
+        flex: 1 1 0;
+        min-width: 0;
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+
+      /* Search input - same height as the button, red focus accent */
+      .sc-master-search {
+        width: 100%;
+        height: 26px;
+        border: 1px solid rgb(204, 50, 50);
+        border-radius: 2px;
+        outline: none;
+        padding: 0 22px 0 8px;
+        font-size: 12px;
+        font-family: "Roboto", "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        color: rgb(33, 33, 33);
+        background: rgb(255, 255, 255);
+        box-sizing: border-box;
+        transition: border-color 0.12s ease-in-out, box-shadow 0.12s ease-in-out;
+      }
+      .sc-master-search:focus {
+        border-color: rgb(204, 50, 50);
+        box-shadow: 0 0 0 2px rgba(204, 50, 50, 0.15);
+      }
+      .sc-master-search::placeholder {
+        color: rgb(185, 185, 185);
+      }
+
+      /* Clear button - absolute inside wrapper */
+      .sc-master-search-clear {
+        position: absolute;
+        right: 5px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        border: none;
+        background: transparent;
+        color: rgb(180, 180, 180);
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0;
+        outline: none;
+      }
+      .sc-master-search-clear:hover {
+        color: rgb(204, 50, 50);
+      }
+      .sc-master-search-clear.sc-visible {
+        display: flex;
+      }
+
+      /* No-results notice */
+      .sc-master-no-results {
+        display: none;
+        padding: 6px 8px;
+        font-size: 12px;
+        font-family: "Roboto", "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        color: rgb(160, 160, 160);
+        font-style: italic;
+        box-sizing: border-box;
+      }
+      .sc-master-no-results.sc-visible {
+        display: block;
+      }
     `;
 
     document.head.appendChild(style);
@@ -163,7 +282,7 @@
     }
 
     toast.classList.remove('sc-toast-visible');
-    void toast.offsetWidth; // force reflow to restart the transition
+    void toast.offsetWidth;
     toast.classList.add('sc-toast-visible');
 
     toastTimeout = setTimeout(() => {
@@ -185,7 +304,6 @@
     const runButton = entryPanel.querySelector('input[type="button"]');
     if (!textarea || !runButton) return;
 
-    // Build toggle wrapper
     const wrap = document.createElement('div');
     wrap.className = 'sc-ps-toggle-wrap';
 
@@ -228,7 +346,6 @@
       }
     });
 
-    // Override the textarea value getter to prepend the PS prefix when active
     const proto = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
     Object.defineProperty(textarea, 'value', {
       get() {
@@ -253,6 +370,99 @@
   function attachEntryPanels() {
     for (const panel of document.querySelectorAll(ENTRY_PANEL_SEL)) {
       injectPsToggle(panel);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // MasterPanel toolbar (+ button + org search)
+  // ---------------------------------------------------------------------------
+  function filterOrgs(listContainer, noResults, query) {
+    const items = listContainer.querySelectorAll(':scope > ul > li');
+    let visible = 0;
+
+    for (const li of items) {
+      const titleEl = li.querySelector('.AllCommandChildrenInvisible > p[title]');
+      const name    = titleEl ? titleEl.getAttribute('title').toLowerCase() : '';
+      const match   = !query || name.includes(query);
+      li.style.display = match ? '' : 'none';
+      if (match) visible++;
+    }
+
+    noResults.classList.toggle('sc-visible', query.length > 0 && visible === 0);
+  }
+
+  function injectMasterToolbar(masterPanel) {
+    if (!isElement(masterPanel) || masterPanel.dataset[MASTER_PANEL_KEY] === '1') return;
+
+    const createP    = masterPanel.querySelector('p.Create');
+    const listContainer = masterPanel.querySelector(MASTER_LIST_SEL);
+    if (!createP || !listContainer) return;
+
+    masterPanel.dataset[MASTER_PANEL_KEY] = '1';
+    injectStyles();
+
+    // Style p.Create as a flex row - the existing "Build +" link stays untouched on the left
+    createP.classList.add('sc-create-enhanced');
+
+    // Search wrapper (holds input + clear button)
+    const wrap = document.createElement('div');
+    wrap.className = 'sc-master-search-wrap';
+
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'sc-master-search';
+    searchInput.placeholder = 'Search organizations\u2026';
+    searchInput.setAttribute('aria-label', 'Search organizations');
+    searchInput.setAttribute('autocomplete', 'off');
+    searchInput.setAttribute('spellcheck', 'false');
+
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'sc-master-search-clear';
+    clearBtn.textContent = '\u00d7';
+    clearBtn.title = 'Clear search';
+
+    wrap.appendChild(searchInput);
+    wrap.appendChild(clearBtn);
+    createP.appendChild(wrap);
+
+    // No-results notice sits after the list container
+    const noResults = document.createElement('div');
+    noResults.className = 'sc-master-no-results';
+    noResults.textContent = 'No matching organizations.';
+    listContainer.insertAdjacentElement('afterend', noResults);
+
+    // Wire up search
+    searchInput.addEventListener('input', () => {
+      const query = searchInput.value.toLowerCase();
+      clearBtn.classList.toggle('sc-visible', query.length > 0);
+      filterOrgs(listContainer, noResults, query);
+    });
+
+    clearBtn.addEventListener('click', () => {
+      searchInput.value = '';
+      clearBtn.classList.remove('sc-visible');
+      filterOrgs(listContainer, noResults, '');
+      searchInput.focus();
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        searchInput.value = '';
+        clearBtn.classList.remove('sc-visible');
+        filterOrgs(listContainer, noResults, '');
+      }
+    });
+
+    console.log(
+      '%c[SC Helper]%c MasterPanel search bar injected beside Build+ link.',
+      'color:#cc3232;font-weight:bold', 'color:inherit'
+    );
+  }
+
+  function attachMasterPanels() {
+    for (const panel of document.querySelectorAll(MASTER_PANEL_SEL)) {
+      injectMasterToolbar(panel);
     }
   }
 
@@ -362,12 +572,13 @@
     const found = !!listPanels.length;
     for (const lp of listPanels) attachListObserver(lp);
     attachEntryPanels();
+    attachMasterPanels();
     if (found) queuePrune();
     return found;
   }
 
-  // Re-run init whenever the DOM changes (handles SPA navigation / late rendering)
   new MutationObserver(() => {
+    attachMasterPanels();
     if (init()) queuePrune();
   }).observe(document.documentElement || document.body, { childList: true, subtree: true });
 

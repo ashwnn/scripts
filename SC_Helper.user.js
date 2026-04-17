@@ -5,7 +5,7 @@
 // @icon         https://www.screenconnect.com/siteassets/media/logos/screenconnect-icon-48x48.png
 // @author       Ashwin C.
 // @description  Automatically prunes old command history in ScreenConnect, keeping only the most recent N groups, and adds a toggleable PowerShell mode to the command entry panel.
-// @match        *://help.tecnet.ca/*
+// @match        *://<your_domain>.com/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==

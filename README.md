@@ -7,8 +7,8 @@ My collection of utilities for automation, and doing random shit in general idk
 - [`RBC_Transaction_Exporter.user.js`](RBC_Transaction_Exporter.user.js) — A browser userscript (Tampermonkey/Violentmonkey/Greasemonkey) that adds a floating a export all button, to export RBC Transactions into CSV instead of standard PDF
 - [`Teams_No_Idle.ps1`](Teams_No_Idle.ps1): A PowerShell console tool for Windows that juggles the mouse or presses F15 with a lightweight TUI to keep Teams, or similar apps, from going idle.
   > **NOTE:** This app was written using Claude Sonnet 4.6 Thinking, based off my original code.
-
   <details><summary>View Screenshot</summary><img alt="Screenshot of Teams_No_Idle.ps1" src="https://github.com/user-attachments/assets/3540716d-51fd-4a88-ae06-5ccb96989ae3" /></details>
+- [`SC_Helper.user.js`](SC_Helper.user.js) - A browser userscript for Tampermonkey, Violentmonkey, or Greasemonkey that automatically removes older ScreenConnect command history, keeps only the newest N groups, and adds an optional PowerShell mode toggle to the command input panel.
 
 ## License
 

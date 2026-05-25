@@ -9,6 +9,7 @@ My collection of utilities for automation, and doing random shit in general idk
   > **NOTE:** This app was written using Claude Sonnet 4.6 Thinking, based off my original code.
   <details><summary>View Screenshot</summary><img alt="Screenshot of Teams_No_Idle.ps1" src="https://github.com/user-attachments/assets/3540716d-51fd-4a88-ae06-5ccb96989ae3" /></details>
 - [`SC_Helper.user.js`](SC_Helper.user.js) - A browser userscript for Tampermonkey, Violentmonkey, or Greasemonkey that automatically removes older ScreenConnect command history, keeps only the newest N groups, and adds an optional PowerShell mode toggle to the command input panel.
+- [`M365_Chat_Export.user.js`](M365_Chat_Export.user.js) - A browser userscript for Tampermonkey, Violentmonkey, or Greasemonkey that helps you export Copilot Chat History as a in a ChatGPT compatible JSON format.
 
 ## License
 

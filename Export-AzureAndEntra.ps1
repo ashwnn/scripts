@@ -1,17 +1,37 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Runs Azure Export for Terraform and EntraExporter into one combined evidence folder.
+Runs Azure Export for Terraform and/or EntraExporter into one evidence folder.
 
 .DESCRIPTION
 Collection-only runner for Azure and Microsoft Entra evidence.
-The script creates this layout:
+Default behavior runs both collectors. Use -ExportTarget to run only one collector.
+
+Default layout when both collectors are selected:
   <OutputRoot>\<Client>\Azure\<Subscription>
   <OutputRoot>\<Client>\Entra
   <OutputRoot>\<Client>\Logs
   <OutputRoot>\<Client>\export-summary.json
 
+Standalone layouts create only the selected collector folder plus Logs and export-summary.json.
+
 It does not delete resources, change Azure settings, modify Entra settings, or run Terraform apply.
+
+.EXAMPLE
+.\Export-AzureAndEntra.ps1
+Runs both Azure Export for Terraform and EntraExporter.
+
+.EXAMPLE
+.\Export-AzureAndEntra.ps1 -ExportTarget Azure -SubscriptionId "<subscription-id>" -NonInteractive
+Runs only Azure Export for Terraform.
+
+.EXAMPLE
+.\Export-AzureAndEntra.ps1 -ExportTarget Aztfexport -SubscriptionId "<subscription-id>" -NonInteractive
+Runs only Azure Export for Terraform using the aztfexport alias.
+
+.EXAMPLE
+.\Export-AzureAndEntra.ps1 -ExportTarget Entra -TenantId "<tenant-id>"
+Runs only EntraExporter.
 #>
 
 [CmdletBinding()]
@@ -20,6 +40,9 @@ param(
     [string]$ClientName,
     [string]$TenantId,
     [string]$SubscriptionId,
+
+    [ValidateSet("Both", "Azure", "Aztfexport", "Entra", "EntraExport", "EntraExporter")]
+    [string]$ExportTarget = "Both",
 
     [ValidateSet("Query", "ResourceGroup", "Resource", "MappingFile")]
     [string]$AztfexportMode = "Query",
@@ -47,10 +70,20 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 
+$script:RunAztfexport = $false
+$script:RunEntra = $false
+$script:NormalizedExportTarget = $null
+
 $script:Summary = [ordered]@{
     started_at = (Get-Date).ToString("o")
     completed_at = $null
     status = "Started"
+    requested_export_target = $ExportTarget
+    effective_export_target = $null
+    collectors = [ordered]@{
+        aztfexport = $false
+        entra_exporter = $false
+    }
     errors = @()
     warnings = @()
     paths = [ordered]@{}
@@ -99,6 +132,8 @@ function ConvertTo-SafeName {
 
 function Save-Summary {
     param([string]$Path)
+    if ($ValidateOnly) { return }
+
     try {
         $script:Summary.completed_at = (Get-Date).ToString("o")
         $script:Summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
@@ -107,7 +142,6 @@ function Save-Summary {
         Write-Warning "Could not write summary file: $($_.Exception.Message)"
     }
 }
-
 
 function Get-SummaryPathOrNull {
     if ($script:Summary.Contains("paths") -and $script:Summary.paths -and $script:Summary.paths.Contains("summary")) {
@@ -137,8 +171,79 @@ function Get-NativeVersion {
     }
 }
 
+function Get-AztfexportVersion {
+    if (-not (Get-Command aztfexport -ErrorAction SilentlyContinue)) { return "not found" }
+
+    $candidates = @(
+        @("--version"),
+        @("version"),
+        @("--help")
+    )
+
+    foreach ($candidate in $candidates) {
+        try {
+            $output = & aztfexport @candidate 2>&1
+            $lines = @($output | ForEach-Object { $_.ToString() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            $firstUseful = @($lines | Where-Object { $_ -notmatch "No help topic|unknown command|unknown flag|error" } | Select-Object -First 1)
+            if ($firstUseful.Count -gt 0) { return $firstUseful[0] }
+        }
+        catch { }
+    }
+
+    return "available"
+}
+
+function Resolve-ExportSelection {
+    $normalized = switch ($ExportTarget) {
+        "Aztfexport" { "Azure"; break }
+        "EntraExport" { "Entra"; break }
+        "EntraExporter" { "Entra"; break }
+        default { $ExportTarget; break }
+    }
+
+    $runAzure = $normalized -in @("Both", "Azure")
+    $runEntra = $normalized -in @("Both", "Entra")
+
+    if ($SkipAztfexport -and $runAzure) {
+        Write-WarnSafe "-SkipAztfexport was provided. Azure Export for Terraform will not run. Prefer -ExportTarget Entra for standalone Entra exports."
+        $runAzure = $false
+    }
+
+    if ($SkipEntra -and $runEntra) {
+        Write-WarnSafe "-SkipEntra was provided. EntraExporter will not run. Prefer -ExportTarget Azure for standalone Azure exports."
+        $runEntra = $false
+    }
+
+    if (-not $runAzure -and -not $runEntra) {
+        throw "No export collectors selected. Use -ExportTarget Both, Azure, or Entra, or remove conflicting skip switches."
+    }
+
+    if ($runAzure -and $runEntra) {
+        $effective = "Both"
+    }
+    elseif ($runAzure) {
+        $effective = "Azure"
+    }
+    else {
+        $effective = "Entra"
+    }
+
+    $script:RunAztfexport = $runAzure
+    $script:RunEntra = $runEntra
+    $script:NormalizedExportTarget = $effective
+    $script:Summary.effective_export_target = $effective
+    $script:Summary.collectors.aztfexport = $runAzure
+    $script:Summary.collectors.entra_exporter = $runEntra
+
+    $collectorNames = @()
+    if ($runAzure) { $collectorNames += "aztfexport" }
+    if ($runEntra) { $collectorNames += "EntraExporter" }
+    Write-Ok "Selected collector(s): $($collectorNames -join ', ')"
+}
+
 function Install-EntraExporterIfApproved {
     if (-not $InstallMissing) { return }
+    if ($ValidateOnly) { throw "EntraExporter is missing. -ValidateOnly will not install missing modules." }
     if ($NonInteractive) { throw "EntraExporter is missing and -NonInteractive prevents installation prompts." }
     Write-Step "Installing EntraExporter for current user"
     Install-Module EntraExporter -Scope CurrentUser -Force -AllowClobber
@@ -147,19 +252,19 @@ function Install-EntraExporterIfApproved {
 function Assert-Dependencies {
     Write-Step "Checking dependencies"
 
-    if (-not $SkipAztfexport) {
+    if ($script:RunAztfexport) {
         if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw "Azure CLI was not found in PATH. Install Azure CLI, then rerun." }
         if (-not (Get-Command terraform -ErrorAction SilentlyContinue)) { throw "Terraform was not found in PATH. Azure Export for Terraform requires Terraform." }
         if (-not (Get-Command aztfexport -ErrorAction SilentlyContinue)) { throw "aztfexport was not found in PATH. Install it with winget install aztfexport or from the Azure/aztfexport releases." }
         $script:Summary.tools.azure_cli = Get-NativeVersion -Command "az"
         $script:Summary.tools.terraform = Get-NativeVersion -Command "terraform"
-        $script:Summary.tools.aztfexport = Get-NativeVersion -Command "aztfexport" -Arguments @("--version")
+        $script:Summary.tools.aztfexport = Get-AztfexportVersion
         Write-Ok "Azure CLI: $($script:Summary.tools.azure_cli)"
         Write-Ok "Terraform: $($script:Summary.tools.terraform)"
         Write-Ok "aztfexport: $($script:Summary.tools.aztfexport)"
     }
 
-    if (-not $SkipEntra) {
+    if ($script:RunEntra) {
         if (-not (Get-Module -ListAvailable -Name EntraExporter)) {
             Install-EntraExporterIfApproved
         }
@@ -209,7 +314,7 @@ function Invoke-AzJson {
 }
 
 function Ensure-AzLoginAndContext {
-    if ($SkipAztfexport) { return }
+    if (-not $script:RunAztfexport) { return }
     Write-Step "Checking Azure CLI context"
 
     $account = $null
@@ -239,7 +344,7 @@ function Ensure-AzLoginAndContext {
 
 function Get-EffectiveClientName {
     if (-not [string]::IsNullOrWhiteSpace($ClientName)) { return ConvertTo-SafeName -Value $ClientName }
-    if (-not $SkipAztfexport -and -not $ValidateOnly) {
+    if ($script:RunAztfexport -and -not $ValidateOnly) {
         try {
             $account = Invoke-AzJson -Arguments @("account", "show", "-o", "json")
             if ($account -and -not [string]::IsNullOrWhiteSpace($account.name)) { return ConvertTo-SafeName -Value $account.name }
@@ -255,20 +360,32 @@ function New-OutputLayout {
     $root = Resolve-Path -LiteralPath $OutputRoot -ErrorAction SilentlyContinue
     if ($root) { $baseRoot = $root.Path } else { $baseRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot) }
     $clientDir = Join-Path $baseRoot $safeClient
-    $subFolder = if (-not [string]::IsNullOrWhiteSpace($SubscriptionId)) { ConvertTo-SafeName -Value $SubscriptionId -Fallback "Subscription" } else { "Subscription" }
-    $azureDir = Join-Path (Join-Path $clientDir "Azure") $subFolder
-    $entraDir = Join-Path $clientDir "Entra"
     $logsDir = Join-Path $clientDir "Logs"
 
-    foreach ($dir in @($clientDir, $azureDir, $entraDir, $logsDir)) {
-        if ((Test-Path -LiteralPath $dir) -and -not $Force -and -not $ValidateOnly) { }
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $azureDir = $null
+    if ($script:RunAztfexport) {
+        $subFolder = if (-not [string]::IsNullOrWhiteSpace($SubscriptionId)) { ConvertTo-SafeName -Value $SubscriptionId -Fallback "Subscription" } else { "Subscription" }
+        $azureDir = Join-Path (Join-Path $clientDir "Azure") $subFolder
+    }
+
+    $entraDir = $null
+    if ($script:RunEntra) {
+        $entraDir = Join-Path $clientDir "Entra"
+    }
+
+    $dirs = @($clientDir, $logsDir)
+    if ($azureDir) { $dirs += $azureDir }
+    if ($entraDir) { $dirs += $entraDir }
+
+    foreach ($dir in $dirs) {
+        if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+        if (-not $ValidateOnly) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     }
 
     $script:Summary.paths.client = $clientDir
-    $script:Summary.paths.azure = $azureDir
-    $script:Summary.paths.entra = $entraDir
     $script:Summary.paths.logs = $logsDir
+    if ($azureDir) { $script:Summary.paths.azure = $azureDir }
+    if ($entraDir) { $script:Summary.paths.entra = $entraDir }
     $script:Summary.paths.summary = Join-Path $clientDir "export-summary.json"
     return [pscustomobject]@{ Client = $clientDir; Azure = $azureDir; Entra = $entraDir; Logs = $logsDir; Summary = $script:Summary.paths.summary }
 }
@@ -285,8 +402,8 @@ function Get-ResourceIdsFromInput {
 
 function Invoke-AztfexportCollection {
     param([string]$AzureDir)
-    if ($SkipAztfexport) {
-        Write-WarnSafe "Skipped Azure Export for Terraform by request."
+    if (-not $script:RunAztfexport) {
+        Write-Info "Azure Export for Terraform not selected."
         return
     }
 
@@ -336,26 +453,31 @@ function Connect-EntraExporterSafe {
 
 function Invoke-EntraCollection {
     param([string]$EntraDir)
-    if ($SkipEntra) {
-        Write-WarnSafe "Skipped EntraExporter by request."
+    if (-not $script:RunEntra) {
+        Write-Info "EntraExporter not selected."
         return
     }
 
     Write-Step "Running EntraExporter"
     if (-not $ValidateOnly) { Connect-EntraExporterSafe }
 
-    $arguments = @($EntraDir)
+    $exportParams = @{ Path = $EntraDir }
+    $commandParts = @("Export-Entra", "-Path", "`"$EntraDir`"")
+
     if ($EntraExportPreset -eq "All") {
-        $arguments += "-All"
+        $exportParams.All = $true
+        $commandParts += "-All"
     }
     elseif ($EntraExportPreset -eq "Custom") {
         if (-not $EntraType -or $EntraType.Count -eq 0) { throw "-EntraType is required when -EntraExportPreset Custom is used." }
-        foreach ($type in $EntraType) { $arguments += @("-Type", $type) }
+        $exportParams.Type = $EntraType
+        $commandParts += @("-Type", ($EntraType -join ","))
     }
 
-    $script:Summary.commands += "Export-Entra $($arguments -join ' ')"
-    Write-Info "Running: Export-Entra $($arguments -join ' ')"
-    if (-not $ValidateOnly) { Export-Entra @arguments }
+    $commandText = $commandParts -join " "
+    $script:Summary.commands += $commandText
+    Write-Info "Running: $commandText"
+    if (-not $ValidateOnly) { Export-Entra @exportParams }
 
     $script:Summary.entra.output = $EntraDir
     if (-not $ValidateOnly) {
@@ -366,6 +488,7 @@ function Invoke-EntraCollection {
 
 try {
     Write-Step "Preparing Microsoft AD and Entra export"
+    Resolve-ExportSelection
     $layout = New-OutputLayout
     $script:Summary.status = "Prepared"
     Save-Summary -Path $layout.Summary
@@ -384,8 +507,9 @@ try {
     $script:Summary.status = if ($ValidateOnly) { "Validated" } else { "Completed" }
     Save-Summary -Path $layout.Summary
     Write-Step "Done"
+    Write-Ok "Effective export target: $($script:Summary.effective_export_target)"
     Write-Ok "Client folder: $($layout.Client)"
-    Write-Ok "Summary file: $($layout.Summary)"
+    if (-not $ValidateOnly) { Write-Ok "Summary file: $($layout.Summary)" }
 }
 catch {
     $message = $_.Exception.Message
